@@ -13,3 +13,5 @@ venv/
 .venv/
 __pycache__/
 .env
+
+musetalk_repo/
