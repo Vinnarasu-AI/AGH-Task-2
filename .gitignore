@@ -9,9 +9,10 @@ __pycache__/
 .mypy_cache/
 .DS_Store
 
-venv/
-.venv/
-__pycache__/
-.env
-
 musetalk_repo/
+
+# Generated runtime audio/video artifacts
+backend/static/*
+!backend/static/.gitkeep
+test_render.png
+*.log

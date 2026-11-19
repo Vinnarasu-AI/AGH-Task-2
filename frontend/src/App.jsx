@@ -1,6 +1,8 @@
-import React, { useState, useRef, useEffect } from "react";
-import { Mic, Square, Sparkles, Volume2, CheckCircle2, RefreshCw, Send } from "lucide-react";
-import VRMAvatar from "./VRMAvatar";
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import { Mic, Square, Sparkles, CheckCircle2, RefreshCw, Send } from "lucide-react";
+import AIInterviewerAvatar from "./AIInterviewerAvatar";
+import AvatarErrorBoundary from "./AvatarErrorBoundary";
+import { playSoundEffect } from "./soundEffects";
 import "./App.css";
 
 function App() {
@@ -10,7 +12,10 @@ function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [backendHealth, setBackendHealth] = useState(null);
   const [micAudioLevel, setMicAudioLevel] = useState(0);
-  const [avatarMouthLevel, setAvatarMouthLevel] = useState(0);
+  const [liveMouthAudioLevel, setLiveMouthAudioLevel] = useState(0);
+
+  // Avatar Emotion: "neutral", "joy", "sorrow", "angry", "fun"
+  const [emotion, setEmotion] = useState("neutral");
 
   // Audio device selection
   const [audioDevices, setAudioDevices] = useState([]);
@@ -27,7 +32,7 @@ function App() {
   const recordingStartTimeRef = useRef(0);
   const recordedChunksRef = useRef([]);
 
-  const loadMicrophoneDevices = async () => {
+  const loadMicrophoneDevices = useCallback(async () => {
     try {
       if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
         const devices = await navigator.mediaDevices.enumerateDevices();
@@ -40,7 +45,7 @@ function App() {
     } catch (e) {
       console.warn("Could not enumerate audio devices:", e);
     }
-  };
+  }, [selectedDeviceId]);
 
   useEffect(() => {
     fetch("http://127.0.0.1:8000/api/health")
@@ -48,18 +53,22 @@ function App() {
       .then((data) => setBackendHealth(data))
       .catch((err) => console.error("Health check error:", err));
 
-    loadMicrophoneDevices();
-  }, []);
+    const timer = setTimeout(() => {
+      loadMicrophoneDevices();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [loadMicrophoneDevices]);
 
   // Start microphone recording
   const startRecording = async () => {
     try {
+      playSoundEffect("mic_start");
       recordedChunksRef.current = [];
 
       const audioConstraints = {
         channelCount: 1,
-        echoCancellation: false,
-        noiseSuppression: false,
+        echoCancellation: true,
+        noiseSuppression: true,
         autoGainControl: true,
       };
 
@@ -70,7 +79,6 @@ function App() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
       loadMicrophoneDevices();
 
-      // AudioContext for live volume meter
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       audioContextRef.current = audioCtx;
       if (audioCtx.state === "suspended") {
@@ -98,7 +106,6 @@ function App() {
       };
       updateVolume();
 
-      // MediaRecorder
       let mimeType = "";
       if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
         mimeType = "audio/webm;codecs=opus";
@@ -120,7 +127,7 @@ function App() {
         if (audioCtx.state !== "closed") {
           try {
             await audioCtx.close();
-          } catch (e) {}
+          } catch { }
         }
         setMicAudioLevel(0);
 
@@ -131,7 +138,7 @@ function App() {
 
       mediaRecorderRef.current = recorder;
       recorder.start(100);
-      recordingStartTimeRef.current = Date.now();
+      recordingStartTimeRef.current = performance.now();
       setIsRecording(true);
       setStatus("Listening");
     } catch (err) {
@@ -142,6 +149,7 @@ function App() {
   };
 
   const stopRecording = () => {
+    playSoundEffect("mic_stop");
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
       const duration = Date.now() - recordingStartTimeRef.current;
       if (duration < 1000) {
@@ -188,6 +196,9 @@ function App() {
       setUserText(result.user_text || "");
       setAiText(result.ai_text || "");
 
+      // Auto-detect emotional sentiment from text
+      autoDetectEmotion(result.ai_text || "");
+
       if (result.audio_url) {
         playRealtimeAudioSync(result.audio_url);
       } else {
@@ -205,6 +216,7 @@ function App() {
     e.preventDefault();
     if (!manualText.trim() || status === "Thinking" || status === "Speaking") return;
 
+    playSoundEffect("click");
     const question = manualText.trim();
     setManualText("");
     setUserText(question);
@@ -225,6 +237,7 @@ function App() {
 
       const result = await response.json();
       setAiText(result.ai_text || "");
+      autoDetectEmotion(result.ai_text || "");
 
       if (result.audio_url) {
         playRealtimeAudioSync(result.audio_url);
@@ -238,8 +251,25 @@ function App() {
     }
   };
 
-  // Synchronized Three-VRM Audio Analysis
+  // Automatic sentiment to emotion mapping
+  const autoDetectEmotion = (text) => {
+    const t = text.toLowerCase();
+    if (t.includes("happy") || t.includes("glad") || t.includes("smile") || t.includes("great") || t.includes("wonderful") || t.includes("love")) {
+      setEmotion("joy");
+    } else if (t.includes("sad") || t.includes("sorry") || t.includes("unfortunate") || t.includes("apologize")) {
+      setEmotion("sorrow");
+    } else if (t.includes("wow") || t.includes("surprise") || t.includes("amazing") || t.includes("excited")) {
+      setEmotion("fun");
+    } else if (t.includes("angry") || t.includes("annoyed") || t.includes("wrong")) {
+      setEmotion("angry");
+    } else {
+      setEmotion("neutral");
+    }
+  };
+
+  // Real-Time Parametric 3D Lip Sync via Web Audio Analyzer
   const playRealtimeAudioSync = (audioUrl) => {
+    playSoundEffect("speech_start");
     setStatus("Speaking");
 
     if (audioPlayRef.current) {
@@ -276,7 +306,6 @@ function App() {
 
         if (analyserNode && freqData) {
           analyserNode.getByteFrequencyData(freqData);
-          // Human voice formant bins 2..28 (~300Hz to 3400Hz)
           let sum = 0;
           const low = 2;
           const high = 28;
@@ -284,6 +313,7 @@ function App() {
             sum += freqData[i];
           }
           const energy = sum / (high - low);
+
           if (energy > 8) {
             level = Math.min(1.0, (energy - 8) / 36);
           } else {
@@ -291,10 +321,10 @@ function App() {
           }
         } else {
           const t = audio.currentTime;
-          level = Math.max(0, Math.sin(t * 14) * 0.8 + 0.2);
+          level = Math.max(0, Math.sin(t * 14) * 0.7 + 0.3);
         }
 
-        setAvatarMouthLevel(level);
+        setLiveMouthAudioLevel(level);
         animFrameIdRef.current = requestAnimationFrame(lipLoop);
       }
     };
@@ -308,12 +338,12 @@ function App() {
 
     audio.onended = () => {
       if (animFrameIdRef.current) cancelAnimationFrame(animFrameIdRef.current);
-      setAvatarMouthLevel(0);
+      setLiveMouthAudioLevel(0);
       setStatus("Idle");
       if (audioCtx && audioCtx.state !== "closed") {
         try {
           audioCtx.close();
-        } catch (e) {}
+        } catch { }
       }
     };
 
@@ -329,7 +359,7 @@ function App() {
       <header className="app-header">
         <div className="logo-group">
           <Sparkles className="sparkle-icon" />
-          <h1>Live Human AI Avatar</h1>
+          <h1>HireIQ — Conversational AI Avatar</h1>
         </div>
         <div className="health-badge">
           {backendHealth ? (
@@ -346,18 +376,47 @@ function App() {
 
       {/* Main Layout */}
       <main className="main-content">
-        {/* Left: 3D VRM Female Avatar */}
+        {/* Left: Avatar Viewport & Customization Controls */}
         <div className="avatar-section">
           <div className="avatar-card">
             <div className="video-wrapper">
-              <VRMAvatar
-                isSpeaking={status === "Speaking"}
-                isThinking={status === "Thinking"}
-                audioLevel={status === "Speaking" ? avatarMouthLevel : 0}
-              />
-              <div className={`status-pill status-${status.toLowerCase()}`}>
-                <span className="pulse-dot"></span>
-                <span>{status}</span>
+              <AvatarErrorBoundary>
+                <AIInterviewerAvatar
+                  status={status}
+                  isSpeaking={status === "Speaking"}
+                  isThinking={status === "Thinking"}
+                  isListening={status === "Listening" || isRecording}
+                  audioLevel={status === "Speaking" ? liveMouthAudioLevel : 0}
+                  emotion={emotion}
+                  modelPath="/avatars/rocketbox-business-female-01.vrm"
+                />
+              </AvatarErrorBoundary>
+            </div>
+
+            {/* Customization Toolbar: Emotion / Reaction Selector for Both Avatars */}
+            <div className="customization-tray">
+              <div className="tray-row">
+                <span className="tray-label">Reactions:</span>
+                <div className="pill-group">
+                  {[
+                    { key: "neutral", label: "Neutral 😐" },
+                    { key: "joy", label: "Happy 😊" },
+                    { key: "sorrow", label: "Sad 😢" },
+                    { key: "angry", label: "Angry 😠" },
+                    { key: "fun", label: "Surprised 😲" },
+                  ].map((em) => (
+                    <button
+                      key={em.key}
+                      className={`reaction-pill ${emotion === em.key ? "selected" : ""}`}
+                      onClick={() => {
+                        playSoundEffect("click");
+                        setEmotion(em.key);
+                      }}
+                    >
+                      {em.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -416,7 +475,7 @@ function App() {
             <form className="text-prompt-form" onSubmit={handleSendText}>
               <input
                 type="text"
-                placeholder="Or type a question to test live lip-sync..."
+                placeholder="Type a message (e.g. 'Hello, what is your name?')..."
                 value={manualText}
                 onChange={(e) => setManualText(e.target.value)}
                 disabled={status === "Thinking" || status === "Speaking"}
@@ -462,13 +521,13 @@ function App() {
                 <strong>STT:</strong> Faster-Whisper (CUDA)
               </li>
               <li>
-                <strong>Brain:</strong> Ollama (llama3)
+                <strong>Brain:</strong> Ollama (llama3) Conversational Assistant
               </li>
               <li>
                 <strong>Voice:</strong> Kokoro TTS (af_bella)
               </li>
               <li>
-                <strong>Face Lip-Sync:</strong> 3D VRM Mesh Blendshapes (`@pixiv/three-vrm`)
+                <strong>Avatar:</strong> 3D VRM Model (Office Seated Avatar with Dynamic Hand Gestures)
               </li>
             </ul>
           </div>

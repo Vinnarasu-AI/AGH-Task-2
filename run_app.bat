@@ -1,9 +1,10 @@
 @echo off
-title Live Human AI Avatar Application
+title HireIQ — Conversational AI Avatar Application
 color 0b
 
 echo =================================================================
-echo           LIVE HUMAN AI AVATAR APPLICATION (OLLAMA + MUSETALK)
+echo         HIREIQ — CONVERSATIONAL AI AVATAR APPLICATION
+echo         Faster-Whisper (CUDA) + Ollama + Kokoro + 3D VRM
 echo =================================================================
 echo.
 
@@ -21,19 +22,18 @@ echo [+] Ollama is ready.
 
 :: 2. Launch FastAPI Backend
 echo [*] Starting FastAPI Backend on http://127.0.0.1:8000 ...
-start "Avatar Backend Server (FastAPI + CUDA)" cmd /k ".\venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000"
+start "HireIQ Backend Server (FastAPI + CUDA)" cmd /k ".\venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000"
 
-:: Wait for GPU models to initialize
-echo [*] Initializing Faster-Whisper, Kokoro TTS, and MuseTalk on GPU...
-echo [*] Waiting 10 seconds for backend models to load...
-timeout /t 10 >nul
+:: Wait for STT & TTS models to initialize
+echo [*] Initializing Faster-Whisper and Kokoro TTS on GPU...
+timeout /t 3 >nul
 
 :: 3. Launch React Frontend
 echo [*] Starting React Frontend on http://127.0.0.1:5173 ...
-start "Avatar Frontend UI (React + Vite)" cmd /k "cd frontend && npm run dev -- --host 127.0.0.1 --port 5173"
+start "HireIQ Frontend UI (React + Vite)" cmd /k "cd frontend && npm run dev -- --host 127.0.0.1 --port 5173"
 
 :: 4. Open Application in Default Browser
-timeout /t 3 >nul
+timeout /t 2 >nul
 start http://127.0.0.1:5173
 
 echo.

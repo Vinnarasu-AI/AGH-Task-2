@@ -1,28 +1,28 @@
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 import sys
 import uuid
 import time
 import json
-import pickle
 import subprocess
 import requests
 import re
 import numpy as np
-import cv2
 import soundfile as sf
 import torch
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # Base paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MUSETALK_DIR = os.path.join(BASE_DIR, "musetalk_repo")
 STATIC_DIR = os.path.join(BASE_DIR, "backend", "static")
 os.makedirs(STATIC_DIR, exist_ok=True)
 
-# Add FFmpeg to PATH
+# Add FFmpeg to PATH if available in WinGet location
 ffmpeg_dir = r"C:\Users\rvinn\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.2-full_build\bin"
 if os.path.exists(ffmpeg_dir):
     os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
@@ -33,24 +33,10 @@ if hasattr(os, "add_dll_directory") and os.path.exists(torch_lib):
     os.add_dll_directory(torch_lib)
 os.environ["PATH"] = torch_lib + os.pathsep + os.environ.get("PATH", "")
 
-# Patch torch.load weights_only=False and map_location='cpu' for PyTorch 2.6
-_orig_load = torch.load
-torch.load = lambda *args, **kwargs: _orig_load(*args, **{**kwargs, "weights_only": False, "map_location": "cpu"})
-
-# Add musetalk to sys.path
-if MUSETALK_DIR not in sys.path:
-    sys.path.insert(0, MUSETALK_DIR)
-
 from faster_whisper import WhisperModel
 from kokoro import KPipeline
-from diffusers import AutoencoderKL
-from musetalk.models.unet import UNet, PositionalEncoding
-from musetalk.utils.audio_processor import AudioProcessor
-from musetalk.utils.utils import datagen
-from musetalk.utils.blending import get_image_blending
-from transformers import WhisperModel as HfWhisperModel
 
-app = FastAPI(title="Live Realistic Human AI Avatar")
+app = FastAPI(title="AI Conversational Avatar Pipeline")
 
 app.add_middleware(
     CORSMiddleware,
@@ -65,75 +51,24 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 # Model singletons
 whisper_stt = None
 kokoro_pipeline = None
-muse_vae = None
-muse_unet = None
-muse_pe = None
-muse_audio_processor = None
-muse_hf_whisper = None
-
-# Avatar materials
-avatar_materials = {
-    "latents": None,
-    "coords": None,
-    "mask_coords": None,
-    "frames": None,
-    "masks": None,
-}
 
 @app.on_event("startup")
 def load_all_services():
-    global whisper_stt, kokoro_pipeline, muse_vae, muse_unet, muse_pe, muse_audio_processor, muse_hf_whisper
-    global avatar_materials
+    global whisper_stt, kokoro_pipeline
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[*] Initializing real-time pipeline on: {device}")
+    print(f"[*] Initializing Conversational Pipeline on device: {device}")
 
     # 1. Faster-Whisper
-    print("[*] Loading Faster-Whisper base.en...")
-    whisper_stt = WhisperModel("base.en", device=device, compute_type="float16")
-    print("[+] Faster-Whisper loaded.")
+    print("[*] Loading Faster-Whisper small.en (High-Accuracy STT)...")
+    whisper_stt = WhisperModel("small.en", device=device, compute_type="float16")
+    print("[+] Faster-Whisper small.en loaded.")
 
     # 2. Kokoro TTS
-    print("[*] Loading Kokoro TTS...")
+    print("[*] Loading Kokoro-82M TTS...")
     kokoro_pipeline = KPipeline(lang_code="a")
     print("[+] Kokoro TTS loaded.")
-
-    # 3. MuseTalk Models
-    print("[*] Loading MuseTalk Neural Models (VAE, UNet, Whisper)...")
-    vae_path = os.path.join(MUSETALK_DIR, "models", "sd-vae").replace("\\", "/")
-    muse_vae = AutoencoderKL.from_pretrained(vae_path, torch_dtype=torch.float16).to(device)
-
-    unet_config_path = os.path.join(MUSETALK_DIR, "models", "musetalk", "musetalk.json")
-    unet_weights_path = os.path.join(MUSETALK_DIR, "models", "musetalk", "pytorch_model.bin")
-    muse_unet = UNet(unet_config=unet_config_path, model_path=unet_weights_path, device="cpu")
-    muse_unet.model.to(device, dtype=torch.float16)
-
-    muse_pe = PositionalEncoding(d_model=384)
-
-    whisper_feature_dir = os.path.join(MUSETALK_DIR, "models", "whisper")
-    muse_audio_processor = AudioProcessor(feature_extractor_path=whisper_feature_dir)
-    muse_hf_whisper = HfWhisperModel.from_pretrained(whisper_feature_dir, torch_dtype=torch.float16).to(device)
-
-    # 4. Avatar Cached Frame & Latent Materials (Using female avatar 'sun')
-    avatar_dir = os.path.join(MUSETALK_DIR, "results", "avatars", "sun")
-    full_imgs_dir = os.path.join(avatar_dir, "full_imgs")
-    mask_dir = os.path.join(avatar_dir, "mask")
-
-    print("[*] Loading avatar reference video frames...")
-    avatar_materials["latents"] = torch.load(os.path.join(avatar_dir, "latents.pt"))
-    with open(os.path.join(avatar_dir, "coords.pkl"), "rb") as f:
-        avatar_materials["coords"] = pickle.load(f)
-    with open(os.path.join(avatar_dir, "mask_coords.pkl"), "rb") as f:
-        avatar_materials["mask_coords"] = pickle.load(f)
-
-    frame_paths = sorted([os.path.join(full_imgs_dir, f) for f in os.listdir(full_imgs_dir) if f.endswith(".png")])
-    mask_paths = sorted([os.path.join(mask_dir, f) for f in os.listdir(mask_dir) if f.endswith(".png")])
-
-    avatar_materials["frames"] = [cv2.imread(p) for p in frame_paths]
-    avatar_materials["masks"] = [cv2.imread(p) for p in mask_paths]
-    
-    torch.cuda.empty_cache()
-    print(f"[+] All models ready! VRAM allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+    print(f"[+] All AI models ready! VRAM allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
 
 class AskTextRequest(BaseModel):
@@ -143,32 +78,36 @@ class AskTextRequest(BaseModel):
 def query_ollama(prompt: str) -> str:
     url = "http://localhost:11434/api/generate"
     system_prompt = (
-        "You are an attractive, friendly, and polite young female AI avatar. "
-        "Answer the user naturally in 1 short sentence (maximum 12 words). "
-        "Never use markdown, lists, asterisks, or emoji."
+        "You are a friendly, intelligent, and natural conversational AI assistant (like ChatGPT and Gemini). "
+        "Answer the user conversationally, warmly, and helpfully in 1 or 2 spoken sentences (under 35 words). "
+        "If the user says hi, hello, or introduces themselves, greet them warmly and answer naturally. "
+        "Do not act like a harsh interviewer. Speak in natural conversational English. "
+        "Never use markdown, asterisks, bullet points, or emojis."
     )
     payload = {
         "model": "llama3",
-        "prompt": f"{system_prompt}\n\nUser: {prompt}\nAvatar:",
+        "prompt": f"{system_prompt}\n\nUser: {prompt}\nAI Assistant:",
         "stream": False,
         "options": {
-            "num_predict": 25,
-            "temperature": 0.5
+            "num_predict": 50,
+            "temperature": 0.7
         }
     }
     try:
         res = requests.post(url, json=payload, timeout=15)
         res.raise_for_status()
         ans = res.json().get("response", "").strip()
+        # Clean formatting
+        ans = re.sub(r'[*_#`~]', '', ans).strip()
         sentences = [s.strip() for s in re.split(r'(?<=[.!?]) +', ans) if s.strip()]
-        return " ".join(sentences[:1]) if sentences else ans
+        return " ".join(sentences[:2]) if sentences else ans
     except Exception as e:
         print(f"[!] Ollama error: {e}")
-        return "Hello! I am glad to meet you."
+        return "Hello! I am doing great and happy to chat with you. How can I help you today?"
 
 
 def generate_speech(text: str, out_wav_path: str):
-    generator = kokoro_pipeline(text, voice="af_bella", speed=1.15)
+    generator = kokoro_pipeline(text, voice="af_bella", speed=1.12)
     audio_segments = []
     for gs, ps, audio in generator:
         if isinstance(audio, torch.Tensor):
@@ -183,104 +122,6 @@ def generate_speech(text: str, out_wav_path: str):
     return out_wav_path
 
 
-def generate_musetalk_avatar(wav_path: str, out_video_path: str):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # 1. Resample audio to 16kHz for whisper
-    temp_16k = wav_path.replace(".wav", "_16k.wav")
-    subprocess.run(
-        f'ffmpeg -y -i "{wav_path}" -vn -ar 16000 -ac 1 "{temp_16k}"',
-        shell=True,
-        check=True,
-        capture_output=True
-    )
-
-    # 2. Extract Whisper features & chunks
-    whisper_features_list, librosa_length = muse_audio_processor.get_audio_feature(temp_16k)
-    whisper_chunks = muse_audio_processor.get_whisper_chunk(
-        whisper_features_list,
-        device=device,
-        weight_dtype=torch.float16,
-        whisper=muse_hf_whisper,
-        librosa_length=librosa_length,
-        fps=25
-    )
-
-    batch_size = 24
-    gen = datagen(whisper_chunks, avatar_materials["latents"], batch_size=batch_size)
-
-    res_frames = []
-    for whisper_batch, latent_batch in gen:
-        if isinstance(whisper_batch, torch.Tensor):
-            a_batch = whisper_batch.to(device=device, dtype=torch.float16)
-        else:
-            a_batch = torch.from_numpy(whisper_batch).to(device=device, dtype=torch.float16)
-
-        a_batch = muse_pe(a_batch).to(dtype=torch.float16)
-        l_batch = latent_batch.to(device=device, dtype=torch.float16)
-
-        with torch.no_grad():
-            pred_latents = muse_unet.model(l_batch, timestep=0, encoder_hidden_states=a_batch).sample
-            recon = muse_vae.decode(pred_latents / 0.18215).sample
-
-        recon = (recon / 2 + 0.5).clamp(0, 1)
-        recon = recon.permute(0, 2, 3, 1).cpu().numpy() * 255.0
-        for rf in recon:
-            res_frames.append(rf.astype(np.uint8))
-
-    # 3. Stream blended frames directly to FFmpeg via pipe (avoids disk I/O bottlenecks)
-    frames_cycle = avatar_materials["frames"]
-    masks_cycle = avatar_materials["masks"]
-    coords_cycle = avatar_materials["coords"]
-    mask_coords_cycle = avatar_materials["mask_coords"]
-    n_cycle = len(frames_cycle)
-
-    h, w = frames_cycle[0].shape[:2]
-    cmd_mux = [
-        "ffmpeg", "-y",
-        "-f", "rawvideo",
-        "-vcodec", "rawvideo",
-        "-s", f"{w}x{h}",
-        "-pix_fmt", "bgr24",
-        "-r", "25",
-        "-i", "-",
-        "-i", wav_path,
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-shortest",
-        out_video_path
-    ]
-
-    proc = subprocess.Popen(cmd_mux, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    for idx, res_frame in enumerate(res_frames):
-        c_idx = idx % n_cycle
-        orig_frame = frames_cycle[c_idx]
-        mask = masks_cycle[c_idx]
-        bbox = coords_cycle[c_idx]
-        mask_coord = mask_coords_cycle[c_idx]
-
-        res_bgr = cv2.cvtColor(res_frame, cv2.COLOR_RGB2BGR)
-        res_bgr = cv2.resize(res_bgr, (bbox[2] - bbox[0], bbox[3] - bbox[1]))
-        blended = get_image_blending(orig_frame, res_bgr, bbox, mask, mask_coord)
-        proc.stdin.write(blended.tobytes())
-
-    proc.stdin.close()
-    proc.wait()
-
-    try:
-        if os.path.exists(temp_16k):
-            os.remove(temp_16k)
-    except:
-        pass
-        pass
-
-    return out_video_path
-
-
 @app.get("/api/health")
 def health_check():
     return {
@@ -290,7 +131,7 @@ def health_check():
             "stt": "Faster-Whisper (CUDA)",
             "brain": "Ollama llama3",
             "tts": "Kokoro-82M",
-            "avatar": "MuseTalk Neural Lip-Sync"
+            "avatar": "3D VRM Rocketbox Avatar"
         }
     }
 
@@ -301,7 +142,6 @@ async def ask_audio(audio: UploadFile = File(...)):
     raw_upload_path = os.path.join(STATIC_DIR, f"upload_{session_id}_{audio.filename or 'audio.webm'}")
     input_wav_path = os.path.join(STATIC_DIR, f"input_{session_id}.wav")
     reply_wav_path = os.path.join(STATIC_DIR, f"reply_{session_id}.wav")
-    reply_vid_path = os.path.join(STATIC_DIR, f"response_{session_id}.mp4")
 
     content = await audio.read()
     print(f"[*] Received user voice upload: {len(content)} bytes")
@@ -344,15 +184,22 @@ async def ask_audio(audio: UploadFile = File(...)):
         language="en",
         beam_size=5,
         vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=400),
-        temperature=0.0
+        vad_parameters=dict(min_silence_duration_ms=300, speech_pad_ms=200),
+        temperature=0.0,
+        condition_on_previous_text=False
     )
     transcription = " ".join([seg.text.strip() for seg in segments]).strip()
     print(f"[STT User Question]: '{transcription}'")
 
     # If VAD filtered too aggressively, retry once with raw audio
     if not transcription:
-        segments, _ = whisper_stt.transcribe(input_wav_path, language="en", beam_size=3, vad_filter=False)
+        segments, _ = whisper_stt.transcribe(
+            input_wav_path,
+            language="en",
+            beam_size=5,
+            vad_filter=False,
+            condition_on_previous_text=False
+        )
         transcription = " ".join([seg.text.strip() for seg in segments]).strip()
         print(f"[STT User Question (retry)]: '{transcription}'")
 
@@ -371,7 +218,7 @@ async def ask_audio(audio: UploadFile = File(...)):
             detail="Could not clearly hear speech. Please speak closer to your microphone."
         )
 
-    # 2. Ollama Llama 3 Brain
+    # 2. Ollama Conversational Brain
     ai_response = query_ollama(transcription)
     print(f"[LLM Response]: {ai_response}")
 
@@ -403,7 +250,9 @@ def ask_text(req: AskTextRequest):
     reply_wav_path = os.path.join(STATIC_DIR, f"reply_{session_id}.wav")
 
     user_text = req.text.strip()
+    print(f"[Text Question]: '{user_text}'")
     ai_response = query_ollama(user_text)
+    print(f"[LLM Response]: {ai_response}")
     generate_speech(ai_response, reply_wav_path)
 
     audio_url = f"http://localhost:8000/static/{os.path.basename(reply_wav_path)}"
@@ -413,6 +262,7 @@ def ask_text(req: AskTextRequest):
         "ai_text": ai_response,
         "audio_url": audio_url
     }
+
 
 if __name__ == "__main__":
     import uvicorn
